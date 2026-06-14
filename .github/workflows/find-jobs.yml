@@ -2,8 +2,7 @@ name: Find Remote Jobs
 
 on:
   schedule:
-    # Runs every 6 hours (UTC). Cambia el cron si quieres otra frecuencia.
-    # Formato: minuto hora dia-mes mes dia-semana
+    # Corre cada 6 horas (UTC). Cambia el cron si quieres otra frecuencia.
     - cron: "0 */6 * * *"
   workflow_dispatch:   # permite correrlo manualmente desde la pestaña Actions
 
@@ -23,6 +22,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
       - name: Run job finder
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
@@ -30,6 +32,7 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python find_jobs.py
 
       - name: Commit updated seen list
