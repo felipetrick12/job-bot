@@ -2,11 +2,10 @@ name: Find Remote Jobs
 
 on:
   schedule:
-    # Corre cada 6 horas (UTC). Cambia el cron si quieres otra frecuencia.
+    # Corre cada 6 horas (UTC).
     - cron: "0 */6 * * *"
-  workflow_dispatch:   # permite correrlo manualmente desde la pestaña Actions
+  workflow_dispatch:
 
-# Permite que el workflow haga commit del archivo seen_jobs.json
 permissions:
   contents: write
 
@@ -25,7 +24,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run job finder
+      - name: Find new jobs & score with Claude
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
@@ -35,10 +34,20 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python find_jobs.py
 
-      - name: Commit updated seen list
+      - name: Monitor inbox for recruiter responses
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python monitor_inbox.py
+
+      - name: Commit updated state files
         run: |
           git config user.name "job-bot"
           git config user.email "job-bot@users.noreply.github.com"
-          git add seen_jobs.json
-          git diff --staged --quiet || git commit -m "Update seen jobs [skip ci]"
+          git add seen_jobs.json seen_emails.json
+          git diff --staged --quiet || git commit -m "Update seen state [skip ci]"
           git push
