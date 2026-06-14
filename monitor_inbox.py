@@ -135,6 +135,21 @@ def _parse_claude_json(raw: str) -> dict:
     return json.loads(raw)
 
 
+# Domains that send job alert newsletters — never real recruiter contact
+_JOB_BOARD_DOMAINS = {
+    "indeed.com", "glassdoor.com", "linkedin.com", "seek.com.au",
+    "adzuna.com", "monster.com", "ziprecruiter.com", "careerjet.com",
+    "jora.com", "remoteok.com", "weworkremotely.com", "remotive.com",
+    "himalayas.app", "arbeitnow.com",
+}
+
+
+def is_job_board_email(em):
+    """Return True if the sender is a job board newsletter, not a real recruiter."""
+    from_lower = em["from"].lower()
+    return any(domain in from_lower for domain in _JOB_BOARD_DOMAINS)
+
+
 def classify_with_claude(em):
     """Returns a dict with job-relevance info, or None on failure."""
     raw = ""
@@ -142,7 +157,14 @@ def classify_with_claude(em):
         import anthropic
         client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-        prompt = f"""Analyze this email. Determine if it's related to a job opportunity or interview for a software developer.
+        prompt = f"""Analyze this email. Determine if a REAL PERSON (recruiter, hiring manager, or company employee) is directly contacting this software developer about a specific job opportunity or interview.
+
+IMPORTANT rules:
+- Automated job alert emails from Indeed, Glassdoor, LinkedIn, Seek etc. → is_job_related: false
+- Newsletter digests listing multiple jobs → is_job_related: false
+- A real person writing directly about a specific role → is_job_related: true
+- An interview invitation from a company → is_interview_invite: true
+
 Output ONLY a raw JSON object — no markdown, no code fences, no extra text.
 
 From: {em['from']}
@@ -154,7 +176,7 @@ Body:
 Output exactly:
 {{"is_job_related": <true or false>, "is_interview_invite": <true or false>, "company": "<company or empty>", "role": "<job title or empty>", "recruiter_name": "<first name or empty>", "proposed_times": "<times mentioned or empty>", "summary": "<one sentence>"}}
 
-is_job_related: true if email mentions a job/position/role/opportunity/interview
+is_job_related: true ONLY if a real person is directly contacting about a specific role
 is_interview_invite: true ONLY if they explicitly ask to schedule a call or interview"""
 
         msg = client.messages.create(
@@ -326,9 +348,14 @@ def main():
     alerts = []
     for i, em in enumerate(new_emails):
         print(f"  [{i+1}/{len(new_emails)}] {em['subject'][:60]}")
-        info = classify_with_claude(em)
         seen.add(em["id"])
 
+        # Skip job board newsletters immediately without calling Claude
+        if is_job_board_email(em):
+            print(f"    → job board newsletter, skipping")
+            continue
+
+        info = classify_with_claude(em)
         if info and info.get("is_job_related"):
             alerts.append({"email": em, "info": info})
             tag = "🗓 INVITE" if info.get("is_interview_invite") else "📩 opportunity"
