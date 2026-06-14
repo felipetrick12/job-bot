@@ -46,8 +46,16 @@ EXCLUDE = []
 MIN_SCORE = 65
 
 SEEN_FILE = Path(__file__).parent / "seen_jobs.json"
+APPLIED_FILE = Path(__file__).parent / "applied_jobs.json"
 USER_AGENT = "Mozilla/5.0 (job-finder; +https://github.com)"
 REQUEST_TIMEOUT = 30
+CANDIDATE_NAME = "Duvan Orozco"
+
+# Email addresses to never auto-apply to
+SKIP_EMAIL_PREFIXES = {"noreply", "no-reply", "donotreply", "support",
+                       "info", "contact", "admin", "newsletter", "hello", "team"}
+SKIP_EMAIL_DOMAINS = {"weworkremotely.com", "remoteok.com", "remotive.com",
+                      "himalayas.app", "arbeitnow.com", "example.com", "github.com"}
 
 # ---------------------------------------------------------------------------
 # CANDIDATE PROFILES (used by Claude to score fit)
@@ -359,6 +367,110 @@ Output exactly: {{"score": <integer 0-100>, "reason": "<max 12 words>"}}"""
 
 
 # ---------------------------------------------------------------------------
+# Auto-apply
+# ---------------------------------------------------------------------------
+
+_APPLY_EMAIL_RE = re.compile(r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b')
+
+
+def find_apply_email(job):
+    """Extract a direct application email from the job description, if present."""
+    text = job.get("tags", "")
+    smtp_user = os.environ.get("SMTP_USER", "").lower()
+    for email in _APPLY_EMAIL_RE.findall(text):
+        local, domain = email.lower().split("@", 1)
+        if domain in SKIP_EMAIL_DOMAINS:
+            continue
+        if any(local.startswith(p) for p in SKIP_EMAIL_PREFIXES):
+            continue
+        if email.lower() == smtp_user:
+            continue
+        return email
+    return None
+
+
+def load_applied():
+    if APPLIED_FILE.exists():
+        try:
+            return set(json.loads(APPLIED_FILE.read_text()))
+        except json.JSONDecodeError:
+            return set()
+    return set()
+
+
+def save_applied(applied):
+    APPLIED_FILE.write_text(json.dumps(list(applied)[-1000:]))
+
+
+def generate_cover_letter(job, cv_text):
+    """Use Claude Sonnet to write a personalized cover letter. Returns body text or None."""
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+        prompt = f"""Write a short, genuine job application email for this candidate.
+
+CANDIDATE:
+{cv_text}
+
+JOB:
+Title: {job['title']}
+Company: {job['company']}
+Location: {job['location']}
+Description: {job['tags'][:1000]}
+
+Rules:
+- 3 paragraphs max, each 2-3 sentences
+- Paragraph 1: specific reason this role/company is interesting (reference something real from the description)
+- Paragraph 2: the 2 most relevant experiences that match this job specifically
+- Paragraph 3: short call to action — available for a call, include GitHub and LinkedIn
+- Tone: direct and confident, not overly formal, not sycophantic
+- Do NOT use "I am writing to express my interest" or any clichéd opener
+- Do NOT address to "Dear Hiring Manager" — start directly with content
+- Links to include: github.com/felipetrick12 · linkedin.com/in/duvantrick-07
+- Sign off: Duvan Orozco
+
+Output ONLY the email body. No subject line. No extra text."""
+
+        msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text.strip() if msg.content else None
+    except Exception as e:
+        print(f"  ! cover letter error: {e}", file=sys.stderr)
+        return None
+
+
+def send_application(apply_email, job, cover_letter):
+    """Send the application email directly to the company."""
+    host = os.environ["SMTP_HOST"]
+    port = int(os.environ.get("SMTP_PORT", "587"))
+    user = os.environ["SMTP_USER"]
+    password = os.environ["SMTP_PASS"]
+
+    job_type = job.get("job_type", "frontend")
+    if "mobile" in job_type:
+        subject = f"React Native Developer – {job['title']} @ {job['company']}"
+    else:
+        subject = f"Senior Frontend Engineer – {job['title']} @ {job['company']}"
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = f"{CANDIDATE_NAME} <{user}>"
+    msg["To"] = apply_email
+    msg["Reply-To"] = user
+    msg.attach(MIMEText(cover_letter, "plain"))
+
+    context = ssl.create_default_context()
+    with smtplib.SMTP(host, port) as server:
+        server.starttls(context=context)
+        server.login(user, password)
+        server.sendmail(user, [apply_email], msg.as_string())
+
+
+# ---------------------------------------------------------------------------
 # Seen-state persistence
 # ---------------------------------------------------------------------------
 
@@ -393,19 +505,28 @@ def build_email_html(new_jobs):
         score = j.get("score", 50)
         reason = j.get("reason", "")
         job_type = j.get("job_type", "")
+        applied_to = j.get("applied_to", "")
+
         if job_type == "mobile":
-            badge = "📱 Mobile"
+            type_badge = "📱 Mobile"
         elif job_type == "frontend":
-            badge = "💻 Frontend"
+            type_badge = "💻 Frontend"
         else:
-            badge = "📱💻 Mobile+Frontend"
+            type_badge = "📱💻 Mobile+Frontend"
+
+        applied_badge = (
+            f'&nbsp;<span style="background:#16a34a;color:#fff;font-size:11px;'
+            f'font-weight:700;padding:2px 8px;border-radius:12px;">✉️ Auto-applied</span>'
+            if applied_to else ""
+        )
 
         rows.append(f"""
           <tr>
             <td style="padding:12px 16px;border-bottom:1px solid #eee;">
               <div style="margin-bottom:5px;">
                 <span style="background:{score_color(score)};color:#fff;font-size:11px;font-weight:700;padding:2px 8px;border-radius:12px;">{score}/100</span>
-                &nbsp;<span style="color:#777;font-size:11px;">{badge}</span>
+                &nbsp;<span style="color:#777;font-size:11px;">{type_badge}</span>
+                {applied_badge}
               </div>
               <a href="{j['url']}" style="color:#0B5260;font-weight:600;text-decoration:none;font-size:15px;">{j['title']}</a><br>
               <span style="color:#555;font-size:13px;">{j['company']}</span>
@@ -415,16 +536,21 @@ def build_email_html(new_jobs):
             </td>
           </tr>""")
 
+    auto_applied_count = sum(1 for j in new_jobs if j.get("applied_to"))
+    subtitle = f"solo matches con score ≥ {MIN_SCORE}"
+    if auto_applied_count:
+        subtitle += f" · ✉️ {auto_applied_count} auto-aplicados"
+
     return f"""\
 <html><body style="font-family:Helvetica,Arial,sans-serif;background:#f5f5f5;padding:20px;">
   <div style="max-width:640px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden;border:1px solid #e5e5e5;">
     <div style="background:#0B5260;color:#fff;padding:16px 20px;">
       <h2 style="margin:0;font-size:18px;">🚀 {len(new_jobs)} jobs nuevos — React Native &amp; Frontend</h2>
-      <p style="margin:4px 0 0;font-size:12px;opacity:.85;">{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} · solo matches con score ≥ {MIN_SCORE}</p>
+      <p style="margin:4px 0 0;font-size:12px;opacity:.85;">{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} · {subtitle}</p>
     </div>
     <table style="width:100%;border-collapse:collapse;">{''.join(rows)}</table>
     <div style="padding:12px 20px;color:#999;font-size:11px;">
-      Fuentes: RemoteOK · Remotive · Arbeitnow · Himalayas · We Work Remotely · scored by Claude AI
+      Fuentes: RemoteOK · Remotive · Arbeitnow · Himalayas · We Work Remotely · scored &amp; applied by Claude AI
     </div>
   </div>
 </body></html>"""
@@ -516,6 +642,34 @@ def main():
     # Sort best first
     scored_jobs.sort(key=lambda j: j.get("score", 0), reverse=True)
     print(f"{len(scored_jobs)} jobs passed score threshold (≥{MIN_SCORE})")
+
+    # Auto-apply to jobs that have a direct application email in their description
+    if use_claude and scored_jobs:
+        applied = load_applied()
+        applied_count = 0
+        for job in scored_jobs:
+            if job["id"] in applied:
+                continue
+            apply_email = find_apply_email(job)
+            if not apply_email:
+                continue
+            cv = CV_MOBILE if job.get("job_type") in ("mobile", "both") else CV_FRONTEND
+            print(f"  auto-applying: {job['title'][:50]} @ {job['company']} → {apply_email}")
+            cover_letter = generate_cover_letter(job, cv)
+            if not cover_letter:
+                continue
+            try:
+                send_application(apply_email, job, cover_letter)
+                job["applied_to"] = apply_email
+                applied.add(job["id"])
+                applied_count += 1
+                print(f"    ✓ application sent")
+                time.sleep(3)  # be polite, avoid spam filters
+            except Exception as e:
+                print(f"    ! failed to send application: {e}", file=sys.stderr)
+        save_applied(applied)
+        if applied_count:
+            print(f"\n✉️  Auto-applied to {applied_count} job(s)")
 
     if scored_jobs:
         try:
