@@ -305,18 +305,29 @@ def matches(job):
 # Claude scoring
 # ---------------------------------------------------------------------------
 
+def _parse_claude_json(raw: str) -> dict:
+    """Parse JSON from Claude response, stripping markdown fences if present."""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+        raw = raw.strip()
+    return json.loads(raw)
+
+
 def score_with_claude(job, cv_text):
     """Score job fit 0–100 using Claude Haiku. Returns (score, reason)."""
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        return 50, "no ANTHROPIC_API_KEY set"
+        return 70, "no ANTHROPIC_API_KEY — defaulting to pass"
 
+    raw = ""
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
 
         prompt = f"""You are a job fit evaluator. Score how well this candidate matches the job.
-Respond ONLY with a valid JSON object — no extra text.
+Output ONLY a raw JSON object — no markdown, no code fences, no extra text.
 
 CANDIDATE PROFILE:
 {cv_text}
@@ -329,18 +340,22 @@ Tags/Description: {job['tags'][:800]}
 
 Scoring weights: skill match 50% · seniority fit 30% · remote/location compatibility 20%
 
-Respond: {{"score": <integer 0-100>, "reason": "<max 12 words explaining the score>"}}"""
+Output exactly: {{"score": <integer 0-100>, "reason": "<max 12 words>"}}"""
 
         msg = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=100,
+            max_tokens=150,
             messages=[{"role": "user", "content": prompt}],
         )
-        result = json.loads(msg.content[0].text.strip())
-        return int(result.get("score", 0)), str(result.get("reason", ""))
+        raw = msg.content[0].text if msg.content else ""
+        result = _parse_claude_json(raw)
+        return int(result.get("score", 70)), str(result.get("reason", ""))
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"  ! Claude JSON parse error: {e} | raw: {raw[:120]!r}", file=sys.stderr)
+        return 70, "parse error — defaulting to pass"
     except Exception as e:
         print(f"  ! Claude scoring error: {e}", file=sys.stderr)
-        return 50, "scoring error"
+        return 70, "scoring error — defaulting to pass"
 
 
 # ---------------------------------------------------------------------------

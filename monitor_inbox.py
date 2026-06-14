@@ -10,6 +10,7 @@ import email.header
 import imaplib
 import json
 import os
+import re
 import smtplib
 import ssl
 import sys
@@ -125,13 +126,24 @@ def fetch_recent_emails(days=7, limit=120):
 # Claude classifier
 # ---------------------------------------------------------------------------
 
+def _parse_claude_json(raw: str) -> dict:
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+        raw = raw.strip()
+    return json.loads(raw)
+
+
 def classify_with_claude(em):
     """Returns a dict with job-relevance info, or None on failure."""
+    raw = ""
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-        prompt = f"""Analyze this email and determine if it's related to a job opportunity or interview invitation for a software developer.
+        prompt = f"""Analyze this email. Determine if it's related to a job opportunity or interview for a software developer.
+Output ONLY a raw JSON object — no markdown, no code fences, no extra text.
 
 From: {em['from']}
 Subject: {em['subject']}
@@ -139,26 +151,22 @@ Date: {em['date']}
 Body:
 {em['body'][:1500]}
 
-Respond ONLY with a valid JSON object — no markdown, no extra text:
-{{
-  "is_job_related": <true or false>,
-  "is_interview_invite": <true or false>,
-  "company": "<company name, or empty string>",
-  "role": "<job title they mention, or empty string>",
-  "recruiter_name": "<recruiter first name, or empty string>",
-  "proposed_times": "<any proposed interview times or dates mentioned, or empty string>",
-  "summary": "<one sentence: what is this person asking for?>"
-}}
+Output exactly:
+{{"is_job_related": <true or false>, "is_interview_invite": <true or false>, "company": "<company or empty>", "role": "<job title or empty>", "recruiter_name": "<first name or empty>", "proposed_times": "<times mentioned or empty>", "summary": "<one sentence>"}}
 
-is_job_related: true if the email mentions a job, position, role, opportunity, or interview
-is_interview_invite: true ONLY if they are explicitly asking to schedule a call or interview"""
+is_job_related: true if email mentions a job/position/role/opportunity/interview
+is_interview_invite: true ONLY if they explicitly ask to schedule a call or interview"""
 
         msg = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=250,
+            max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )
-        return json.loads(msg.content[0].text.strip())
+        raw = msg.content[0].text if msg.content else ""
+        return _parse_claude_json(raw)
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"  ! JSON parse error: {e} | raw: {raw[:120]!r}", file=sys.stderr)
+        return None
     except Exception as e:
         print(f"  ! classify error: {e}", file=sys.stderr)
         return None
